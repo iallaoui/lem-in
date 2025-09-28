@@ -93,10 +93,12 @@ func parseInput(filename string) (*Farm, error) {
 	return farm, nil
 }
 
-// ----- BFS from neighbor -----
-func bfsFromNeighbor(f *Farm, startNeigh string) [][]string {
-	queue := [][]string{{f.Start, startNeigh}}
-	var foundPaths [][]string
+// ----- Optimized BFS to find shortest path avoiding blocked rooms -----
+func bfsShortestPath(f *Farm, startNeighbor string, blockedRooms map[string]bool) []string {
+	queue := [][]string{{f.Start, startNeighbor}}
+	visited := make(map[string]bool)
+	visited[f.Start] = true
+	visited[startNeighbor] = true
 
 	for len(queue) > 0 {
 		path := queue[0]
@@ -104,19 +106,96 @@ func bfsFromNeighbor(f *Farm, startNeigh string) [][]string {
 		last := path[len(path)-1]
 
 		if last == f.End {
-			foundPaths = append(foundPaths, path)
-			continue
+			return path
 		}
 
 		for _, next := range f.Rooms[last].Links {
-			if !contains(path, next) {
-				newPath := append([]string{}, path...)
+			if !visited[next] && !blockedRooms[next] {
+				visited[next] = true
+				newPath := make([]string, len(path))
+				copy(newPath, path)
 				newPath = append(newPath, next)
 				queue = append(queue, newPath)
 			}
 		}
 	}
-	return foundPaths
+	return nil
+}
+
+// ----- Find non-overlapping paths for each neighbor -----
+func findNonOverlappingPaths(f *Farm) [][]string {
+	var selectedPaths [][]string
+	blockedRooms := make(map[string]bool)
+	
+	// Sort neighbors by number of links (try neighbors with fewer connections first)
+	neighbors := make([]string, len(f.Rooms[f.Start].Links))
+	copy(neighbors, f.Rooms[f.Start].Links)
+	
+	// Simple sorting by number of links
+	for i := 0; i < len(neighbors)-1; i++ {
+		for j := i + 1; j < len(neighbors); j++ {
+			if len(f.Rooms[neighbors[j]].Links) < len(f.Rooms[neighbors[i]].Links) {
+				neighbors[i], neighbors[j] = neighbors[j], neighbors[i]
+			}
+		}
+	}
+
+	// Find path for each neighbor
+	for _, neighbor := range neighbors {
+		path := bfsShortestPath(f, neighbor, blockedRooms)
+		if path != nil {
+			selectedPaths = append(selectedPaths, path)
+			
+			// Block intermediate rooms from this path (except start and end)
+			for i := 1; i < len(path)-1; i++ {
+				blockedRooms[path[i]] = true
+			}
+		}
+	}
+
+	return selectedPaths
+}
+
+// ----- Find all shortest paths for each neighbor (without blocking) -----
+func findAllShortestPaths(f *Farm) [][]string {
+	var allPaths [][]string
+	
+	for _, neighbor := range f.Rooms[f.Start].Links {
+		// Use BFS to find shortest path for this neighbor
+		queue := [][]string{{f.Start, neighbor}}
+		visited := make(map[string]bool)
+		visited[f.Start] = true
+		visited[neighbor] = true
+		
+		var shortestPath []string
+		
+		for len(queue) > 0 && shortestPath == nil {
+			path := queue[0]
+			queue = queue[1:]
+			current := path[len(path)-1]
+			
+			if current == f.End {
+				shortestPath = path
+				break
+			}
+			
+			for _, next := range f.Rooms[current].Links {
+				if !visited[next] {
+					visited[next] = true
+					newPath := make([]string, len(path))
+					copy(newPath, path)
+					newPath = append(newPath, next)
+					queue = append(queue, newPath)
+				}
+			}
+		}
+		
+		if shortestPath != nil {
+			allPaths = append(allPaths, shortestPath)
+		}
+	}
+	
+	return allPaths
 }
 
 // ----- Helper -----
@@ -129,72 +208,169 @@ func contains(path []string, room string) bool {
 	return false
 }
 
-// ----- Collect all paths per neighbor -----
-func collectAllPaths(f *Farm) [][]string {
-	var allPaths [][]string
-	for _, nb := range f.Rooms[f.Start].Links {
-		paths := bfsFromNeighbor(f, nb)
-		allPaths = append(allPaths, paths...)
+// ----- Check if two paths share intermediate rooms -----
+func pathsShareRooms(path1, path2 []string) bool {
+	// Create set of intermediate rooms for path1
+	rooms1 := make(map[string]bool)
+	for i := 1; i < len(path1)-1; i++ {
+		rooms1[path1[i]] = true
 	}
-	return allPaths
+	
+	// Check if path2 uses any of these rooms
+	for i := 1; i < len(path2)-1; i++ {
+		if rooms1[path2[i]] {
+			return true
+		}
+	}
+	return false
 }
 
-// ----- Filter paths - keep only shortest path per starting neighbor -----
-func filterPaths(f *Farm, allPaths [][]string) [][]string {
-	// Group paths by their first room after start (the neighbor)
-	pathGroups := make(map[string][][]string)
-
-	for _, path := range allPaths {
-		if len(path) >= 2 {
-			firstNeighbor := path[1] // First room after start
-			pathGroups[firstNeighbor] = append(pathGroups[firstNeighbor], path)
-		}
+// ----- Select best non-conflicting paths -----
+func selectBestPaths(f *Farm, allPaths [][]string) [][]string {
+	if len(allPaths) == 0 {
+		return nil
 	}
-
-	// For each group, keep only the shortest path
-	filtered := [][]string{}
-	for _, paths := range pathGroups {
-		if len(paths) == 0 {
-			continue
-		}
-
-		shortest := paths[0]
-		for _, path := range paths {
-			if len(path) < len(shortest) {
-				shortest = path
+	
+	// Sort paths by length (shortest first)
+	for i := 0; i < len(allPaths)-1; i++ {
+		for j := i + 1; j < len(allPaths); j++ {
+			if len(allPaths[j]) < len(allPaths[i]) {
+				allPaths[i], allPaths[j] = allPaths[j], allPaths[i]
 			}
 		}
-		filtered = append(filtered, shortest)
 	}
-
-	return filtered
+	
+	var selected [][]string
+	usedRooms := make(map[string]bool)
+	
+	for _, path := range allPaths {
+		conflict := false
+		
+		// Check if this path conflicts with any selected path
+		for _, selectedPath := range selected {
+			if pathsShareRooms(path, selectedPath) {
+				conflict = true
+				break
+			}
+		}
+		
+		if !conflict {
+			selected = append(selected, path)
+			// Mark intermediate rooms as used
+			for i := 1; i < len(path)-1; i++ {
+				usedRooms[path[i]] = true
+			}
+		}
+	}
+	
+	return selected
 }
 
-// // ----- FIXED Distribution - Use ALL available paths -----
-// ----- PERFECT Distribution for 8 rounds -----
-func simulatePaths(f *Farm, paths [][]string) {
+// ----- Optimized simulation -----
+// ----- Optimized simulation -----
+// ----- Optimized simulation with balancing -----
+func simulateAnts(f *Farm, paths [][]string) {
+	if len(paths) == 0 {
+		fmt.Println("No valid paths found!")
+		return
+	}
+
 	ants := f.Ants
 	positions := make([]int, ants)
-	antPaths := make([][]string, ants)
-	for i := 0; i < ants; i++ {
-		antPaths[i] = paths[i%len(paths)]
-		positions[i] = 0
+	antPaths := make([]int, ants)
+
+	// --- 1) حساب أطوال المسارات
+	type pathInfo struct {
+		index int
+		len   int
 	}
-	done := false
-	for !done {
-		done = true
-		output := []string{}
-		for i := 0; i < ants; i++ {
-			if positions[i] < len(antPaths[i])-1 {
-				done = false
-				positions[i]++
-				output = append(output, fmt.Sprintf("L%d-%s", i+1, antPaths[i][positions[i]]))
+	infos := make([]pathInfo, len(paths))
+	for i, path := range paths {
+		infos[i] = pathInfo{i, len(path) - 1}
+	}
+
+	// --- 2) توزيع محسّن للنمل
+	antsAssigned := make([]int, len(paths))
+	for a := 0; a < ants; a++ {
+		best := 0
+		bestScore := infos[0].len + antsAssigned[infos[0].index]
+		for _, pi := range infos {
+			score := pi.len + antsAssigned[pi.index]
+			if score < bestScore {
+				best = pi.index
+				bestScore = score
 			}
 		}
-		if len(output) > 0 {
-			fmt.Println(strings.Join(output, " "))
-		}
+		antPaths[a] = best
+		antsAssigned[best]++
+		positions[a] = 0
 	}
+
+	// --- 3) Simulation
+	round := 1
+	antsFinished := 0
+	totalMoves := 0
+
+	fmt.Printf("\n=== Starting Optimized Simulation ===\n")
+	fmt.Printf("Ants: %d, Paths: %d\n", ants, len(paths))
+	for i, p := range paths {
+		fmt.Printf("Path %d (len %d): %d ants\n", i+1, len(p)-1, antsAssigned[i])
+	}
+
+	for antsFinished < ants {
+		moves := []string{}
+		occupied := make(map[string]bool)
+
+		for ant := 0; ant < ants; ant++ {
+			currentPath := paths[antPaths[ant]]
+			if positions[ant] >= len(currentPath)-1 {
+				continue
+			}
+			nextPos := positions[ant] + 1
+			nextRoom := currentPath[nextPos]
+
+			if nextRoom == f.End || !occupied[nextRoom] {
+				positions[ant] = nextPos
+				moves = append(moves, fmt.Sprintf("L%d-%s", ant+1, nextRoom))
+				if nextRoom != f.End {
+					occupied[nextRoom] = true
+				}
+				if nextRoom == f.End {
+					antsFinished++
+				}
+				totalMoves++
+			}
+		}
+
+		if len(moves) > 0 {
+			fmt.Printf("Turn %3d: %s\n", round, strings.Join(moves, " "))
+		}
+		round++
+	}
+
+	// --- 4) Statistics
+	fmt.Printf("\n=== Simulation Statistics ===\n")
+	fmt.Printf("Total turns: %d\n", round-1)
+	theoretical := (ants + sum(pathLengths(paths)) - 1) / len(paths)
+	fmt.Printf("Theoretical minimum: %d\n", theoretical)
+	fmt.Printf("Efficiency: %.2f%%\n", float64(theoretical)/float64(round-1)*100)
+}
+// helper: يحسب أطوال جميع المسارات
+func pathLengths(paths [][]string) []int {
+	lengths := make([]int, len(paths))
+	for i, path := range paths {
+		lengths[i] = len(path) - 1
+	}
+	return lengths
+}
+
+// helper
+func sum(arr []int) int {
+	total := 0
+	for _, v := range arr {
+		total += v
+	}
+	return total
 }
 
 // ----- MAIN -----
@@ -210,21 +386,47 @@ func main() {
 		return
 	}
 
-	allPaths := collectAllPaths(farm)
+	fmt.Printf("Farm: %d ants, start=%s, end=%s\n", farm.Ants, farm.Start, farm.End)
+	fmt.Printf("Start room has %d neighbors: %v\n", len(farm.Rooms[farm.Start].Links), farm.Rooms[farm.Start].Links)
 
-	fmt.Println("All paths found:")
+	// Method 1: Find all shortest paths first
+	fmt.Println("\n=== Finding all shortest paths ===")
+	allPaths := findAllShortestPaths(farm)
+	fmt.Printf("Found %d shortest paths:\n", len(allPaths))
 	for i, p := range allPaths {
 		fmt.Printf("Path %d: %v (length: %d)\n", i+1, p, len(p))
 	}
 
-	// Filter paths to keep only shortest path per starting neighbor
-	filteredPaths := filterPaths(farm, allPaths)
-
-	fmt.Println("\nFiltered paths (shortest per starting neighbor):")
-	for i, p := range filteredPaths {
+	// Method 2: Select non-conflicting paths
+	fmt.Println("\n=== Selecting non-conflicting paths ===")
+	bestPaths := selectBestPaths(farm, allPaths)
+	fmt.Printf("Selected %d non-conflicting paths:\n", len(bestPaths))
+	for i, p := range bestPaths {
 		fmt.Printf("Path %d: %v (length: %d)\n", i+1, p, len(p))
 	}
 
-	// Run PERFECT distribution simulation
-	simulatePaths(farm, filteredPaths)
+	// Method 3: Find non-overlapping paths directly
+	fmt.Println("\n=== Finding non-overlapping paths directly ===")
+	nonOverlapPaths := findNonOverlappingPaths(farm)
+	fmt.Printf("Found %d non-overlapping paths:\n", len(nonOverlapPaths))
+	for i, p := range nonOverlapPaths {
+		fmt.Printf("Path %d: %v (length: %d)\n", i+1, p, len(p))
+	}
+
+	// Use the best set of paths
+	var finalPaths [][]string
+	if len(nonOverlapPaths) > len(bestPaths) {
+		finalPaths = nonOverlapPaths
+	} else {
+		finalPaths = bestPaths
+	}
+
+	if len(finalPaths) == 0 {
+		fmt.Println("No valid paths found!")
+		return
+	}
+
+	// Run simulation
+	fmt.Println("\n=== Simulation ===")
+	simulateAnts(farm, finalPaths)
 }
