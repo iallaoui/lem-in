@@ -32,12 +32,15 @@ func parseInput(filename string) (*Farm, error) {
 	}
 	defer file.Close()
 
+	startSet := false
+	endSet := false
 	scanner := bufio.NewScanner(file)
 	var lastCmd string
 	lineCount := 0
+	coords := make(map[string]bool) // check duplicate coordinates
 
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" || (strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "##")) {
 			continue
 		}
@@ -57,17 +60,37 @@ func parseInput(filename string) (*Farm, error) {
 		if strings.Contains(line, " ") {
 			parts := strings.Fields(line)
 			if len(parts) != 3 {
-				return nil, fmt.Errorf("invalid room line: %q", line)
+				return nil, fmt.Errorf("invalid room definition: %q", line)
 			}
 			name := parts[0]
-			x, _ := strconv.Atoi(parts[1])
-			y, _ := strconv.Atoi(parts[2])
+			if _, exists := farm.Rooms[name]; exists {
+				return nil, fmt.Errorf("duplicate room name: %q", name)
+			}
+			x, err1 := strconv.Atoi(parts[1])
+			y, err2 := strconv.Atoi(parts[2])
+			if err1 != nil || err2 != nil {
+				return nil, fmt.Errorf("invalid coordinates for room %q", name)
+			}
+			coordKey := fmt.Sprintf("%d-%d", x, y)
+			if coords[coordKey] {
+				return nil, fmt.Errorf("duplicate coordinates (%d,%d)", x, y)
+			}
+			coords[coordKey] = true
 			farm.Rooms[name] = &Room{Name: name, X: x, Y: y}
+
 			if lastCmd == "##start" {
+				if startSet {
+					return nil, fmt.Errorf("more than one start room defined")
+				}
 				farm.Start = name
+				startSet = true
 			}
 			if lastCmd == "##end" {
+				if endSet {
+					return nil, fmt.Errorf("more than one end room defined")
+				}
 				farm.End = name
+				endSet = true
 			}
 			lastCmd = ""
 			continue
@@ -77,13 +100,14 @@ func parseInput(filename string) (*Farm, error) {
 			if len(parts) != 2 {
 				return nil, fmt.Errorf("invalid tunnel line: %q", line)
 			}
-			a, b := parts[0], parts[1]
-			if farm.Rooms[a] != nil {
-				farm.Rooms[a].Links = append(farm.Rooms[a].Links, b)
+			a, b := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			if farm.Rooms[a] == nil || farm.Rooms[b] == nil {
+				return nil, fmt.Errorf("tunnel references unknown room(s): %q", line)
 			}
-			if farm.Rooms[b] != nil {
-				farm.Rooms[b].Links = append(farm.Rooms[b].Links, a)
-			}
+			farm.Rooms[a].Links = append(farm.Rooms[a].Links, b)
+			farm.Rooms[b].Links = append(farm.Rooms[b].Links, a)
+		} else {
+			return nil, fmt.Errorf("invalid line format: %q", line)
 		}
 	}
 
@@ -126,11 +150,11 @@ func bfsShortestPath(f *Farm, startNeighbor string, blockedRooms map[string]bool
 func findNonOverlappingPaths(f *Farm) [][]string {
 	var selectedPaths [][]string
 	blockedRooms := make(map[string]bool)
-	
+
 	// Sort neighbors by number of links (try neighbors with fewer connections first)
 	neighbors := make([]string, len(f.Rooms[f.Start].Links))
 	copy(neighbors, f.Rooms[f.Start].Links)
-	
+
 	// Simple sorting by number of links
 	for i := 0; i < len(neighbors)-1; i++ {
 		for j := i + 1; j < len(neighbors); j++ {
@@ -145,7 +169,7 @@ func findNonOverlappingPaths(f *Farm) [][]string {
 		path := bfsShortestPath(f, neighbor, blockedRooms)
 		if path != nil {
 			selectedPaths = append(selectedPaths, path)
-			
+
 			// Block intermediate rooms from this path (except start and end)
 			for i := 1; i < len(path)-1; i++ {
 				blockedRooms[path[i]] = true
@@ -159,26 +183,26 @@ func findNonOverlappingPaths(f *Farm) [][]string {
 // ----- Find all shortest paths for each neighbor (without blocking) -----
 func findAllShortestPaths(f *Farm) [][]string {
 	var allPaths [][]string
-	
+
 	for _, neighbor := range f.Rooms[f.Start].Links {
 		// Use BFS to find shortest path for this neighbor
 		queue := [][]string{{f.Start, neighbor}}
 		visited := make(map[string]bool)
 		visited[f.Start] = true
 		visited[neighbor] = true
-		
+
 		var shortestPath []string
-		
+
 		for len(queue) > 0 && shortestPath == nil {
 			path := queue[0]
 			queue = queue[1:]
 			current := path[len(path)-1]
-			
+
 			if current == f.End {
 				shortestPath = path
 				break
 			}
-			
+
 			for _, next := range f.Rooms[current].Links {
 				if !visited[next] {
 					visited[next] = true
@@ -189,25 +213,16 @@ func findAllShortestPaths(f *Farm) [][]string {
 				}
 			}
 		}
-		
+
 		if shortestPath != nil {
 			allPaths = append(allPaths, shortestPath)
 		}
 	}
-	
+
 	return allPaths
 }
 
 // ----- Helper -----
-func contains(path []string, room string) bool {
-	for _, r := range path {
-		if r == room {
-			return true
-		}
-	}
-	return false
-}
-
 // ----- Check if two paths share intermediate rooms -----
 func pathsShareRooms(path1, path2 []string) bool {
 	// Create set of intermediate rooms for path1
@@ -215,7 +230,7 @@ func pathsShareRooms(path1, path2 []string) bool {
 	for i := 1; i < len(path1)-1; i++ {
 		rooms1[path1[i]] = true
 	}
-	
+
 	// Check if path2 uses any of these rooms
 	for i := 1; i < len(path2)-1; i++ {
 		if rooms1[path2[i]] {
@@ -230,7 +245,7 @@ func selectBestPaths(f *Farm, allPaths [][]string) [][]string {
 	if len(allPaths) == 0 {
 		return nil
 	}
-	
+
 	// Sort paths by length (shortest first)
 	for i := 0; i < len(allPaths)-1; i++ {
 		for j := i + 1; j < len(allPaths); j++ {
@@ -239,13 +254,13 @@ func selectBestPaths(f *Farm, allPaths [][]string) [][]string {
 			}
 		}
 	}
-	
+
 	var selected [][]string
 	usedRooms := make(map[string]bool)
-	
+
 	for _, path := range allPaths {
 		conflict := false
-		
+
 		// Check if this path conflicts with any selected path
 		for _, selectedPath := range selected {
 			if pathsShareRooms(path, selectedPath) {
@@ -253,7 +268,7 @@ func selectBestPaths(f *Farm, allPaths [][]string) [][]string {
 				break
 			}
 		}
-		
+
 		if !conflict {
 			selected = append(selected, path)
 			// Mark intermediate rooms as used
@@ -262,116 +277,78 @@ func selectBestPaths(f *Farm, allPaths [][]string) [][]string {
 			}
 		}
 	}
-	
+
 	return selected
 }
 
-// ----- Optimized simulation -----
-// ----- Optimized simulation -----
-// ----- Optimized simulation with balancing -----
-func simulateAnts(f *Farm, paths [][]string) {
-	if len(paths) == 0 {
-		fmt.Println("No valid paths found!")
-		return
+
+func distributeAnts(ants int, paths [][]string) [][]int {
+	lengths := make([]int, len(paths))
+	for i, p := range paths {
+		lengths[i] = len(p) - 1
 	}
 
-	ants := f.Ants
-	positions := make([]int, ants)
-	antPaths := make([]int, ants)
+	distribution := make([][]int, len(paths))
+	assigned := make([]int, len(paths))
 
-	// --- 1) حساب أطوال المسارات
-	type pathInfo struct {
-		index int
-		len   int
-	}
-	infos := make([]pathInfo, len(paths))
-	for i, path := range paths {
-		infos[i] = pathInfo{i, len(path) - 1}
-	}
-
-	// --- 2) توزيع محسّن للنمل
-	antsAssigned := make([]int, len(paths))
-	for a := 0; a < ants; a++ {
+	for a := 1; a <= ants; a++ {
 		best := 0
-		bestScore := infos[0].len + antsAssigned[infos[0].index]
-		for _, pi := range infos {
-			score := pi.len + antsAssigned[pi.index]
+		bestScore := lengths[0] + assigned[0]
+		for i := 1; i < len(paths); i++ {
+			score := lengths[i] + assigned[i]
 			if score < bestScore {
-				best = pi.index
+				best = i
 				bestScore = score
 			}
 		}
-		antPaths[a] = best
-		antsAssigned[best]++
-		positions[a] = 0
+		distribution[best] = append(distribution[best], a)
+		assigned[best]++
+	}
+	return distribution
+}
+
+func simulateAnts(paths [][]string, antDistribution [][]int) string {
+	var finalResult string
+	type AntPosition struct {
+		ant  int
+		path int
+		step int
 	}
 
-	// --- 3) Simulation
-	round := 1
-	antsFinished := 0
-	totalMoves := 0
-
-	fmt.Printf("\n=== Starting Optimized Simulation ===\n")
-	fmt.Printf("Ants: %d, Paths: %d\n", ants, len(paths))
-	for i, p := range paths {
-		fmt.Printf("Path %d (len %d): %d ants\n", i+1, len(p)-1, antsAssigned[i])
+	var antPositions []AntPosition
+	for pathIndex, ants := range antDistribution {
+		for _, ant := range ants {
+			antPositions = append(antPositions, AntPosition{ant, pathIndex, 0})
+		}
 	}
+	for len(antPositions) > 0 {
+		var moves []string
+		var newPositions []AntPosition
+		usedLinks := make(map[string]bool)
 
-	for antsFinished < ants {
-		moves := []string{}
-		occupied := make(map[string]bool)
-
-		for ant := 0; ant < ants; ant++ {
-			currentPath := paths[antPaths[ant]]
-			if positions[ant] >= len(currentPath)-1 {
-				continue
-			}
-			nextPos := positions[ant] + 1
-			nextRoom := currentPath[nextPos]
-
-			if nextRoom == f.End || !occupied[nextRoom] {
-				positions[ant] = nextPos
-				moves = append(moves, fmt.Sprintf("L%d-%s", ant+1, nextRoom))
-				if nextRoom != f.End {
-					occupied[nextRoom] = true
+		for _, pos := range antPositions {
+			if pos.step < len(paths[pos.path])-1 {
+				currentRoom := paths[pos.path][pos.step]
+				nextRoom := paths[pos.path][pos.step+1]
+				link := currentRoom + "-" + nextRoom
+				if !usedLinks[link] {
+					moves = append(moves, fmt.Sprintf("L%d-%s", pos.ant, nextRoom))
+					newPositions = append(newPositions, AntPosition{pos.ant, pos.path, pos.step + 1})
+					usedLinks[link] = true
+				} else {
+					newPositions = append(newPositions, pos)
 				}
-				if nextRoom == f.End {
-					antsFinished++
-				}
-				totalMoves++
 			}
 		}
-
 		if len(moves) > 0 {
-			fmt.Printf("Turn %3d: %s\n", round, strings.Join(moves, " "))
+			finalResult += strings.Join(moves, " ")
+			finalResult += "\n"
 		}
-		round++
+		antPositions = newPositions
 	}
-
-	// --- 4) Statistics
-	fmt.Printf("\n=== Simulation Statistics ===\n")
-	fmt.Printf("Total turns: %d\n", round-1)
-	theoretical := (ants + sum(pathLengths(paths)) - 1) / len(paths)
-	fmt.Printf("Theoretical minimum: %d\n", theoretical)
-	fmt.Printf("Efficiency: %.2f%%\n", float64(theoretical)/float64(round-1)*100)
-}
-// helper: يحسب أطوال جميع المسارات
-func pathLengths(paths [][]string) []int {
-	lengths := make([]int, len(paths))
-	for i, path := range paths {
-		lengths[i] = len(path) - 1
-	}
-	return lengths
+	return finalResult
 }
 
-// helper
-func sum(arr []int) int {
-	total := 0
-	for _, v := range arr {
-		total += v
-	}
-	return total
-}
 
 // ----- MAIN -----
 func main() {
@@ -428,5 +405,8 @@ func main() {
 
 	// Run simulation
 	fmt.Println("\n=== Simulation ===")
-	simulateAnts(farm, finalPaths)
+	antDistribution := distributeAnts(farm.Ants, finalPaths)
+
+	result := simulateAnts(finalPaths, antDistribution)
+	fmt.Print(result)
 }
